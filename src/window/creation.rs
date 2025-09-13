@@ -39,19 +39,60 @@ pub fn get_window_hwnd(window: &Window) -> Option<HWND> {
 pub fn hide_from_taskbar(window: &Window) {
     if let Some(hwnd) = get_window_hwnd(window) {
         unsafe {
+            // 先隐藏窗口
+            let _ = ShowWindow(hwnd, SW_HIDE);
+            
             // 获取当前扩展样式
             let mut ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
             
             // 添加 WS_EX_TOOLWINDOW 样式来隐藏任务栏图标
+            // 同时移除可能干扰的样式
             ex_style |= WS_EX_TOOLWINDOW.0;
+            ex_style &= !WS_EX_APPWINDOW.0; // 确保移除 APPWINDOW 样式
             
             // 设置新的扩展样式
             SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style as i32);
             
-            // 强制系统重新评估窗口的任务栏显示状态
-            // 这是必需的，因为窗口样式改变后需要刷新才能生效
-            let _ = ShowWindow(hwnd, SW_HIDE);
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE); // 使用 SW_SHOWNOACTIVATE 避免激活窗口
+            // 获取当前窗口样式并确保正确设置
+            let mut style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+            style &= !WS_VISIBLE.0; // 确保窗口初始不可见
+            SetWindowLongW(hwnd, GWL_STYLE, style as i32);
+            
+            // 强制更新窗口的Z序和任务栏状态
+            // 使用更强制的方法确保样式生效
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED
+            );
+        }
+    }
+}
+
+/// 确保窗口样式持续有效（在显示窗口时调用）
+pub fn ensure_taskbar_hidden(window: &Window) {
+    if let Some(hwnd) = get_window_hwnd(window) {
+        unsafe {
+            // 检查并确保扩展样式正确
+            let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            
+            // 如果样式不正确，重新设置
+            if (ex_style & WS_EX_TOOLWINDOW.0) == 0 || (ex_style & WS_EX_APPWINDOW.0) != 0 {
+                let mut new_ex_style = ex_style;
+                new_ex_style |= WS_EX_TOOLWINDOW.0;
+                new_ex_style &= !WS_EX_APPWINDOW.0;
+                
+                SetWindowLongW(hwnd, GWL_EXSTYLE, new_ex_style as i32);
+                
+                // 强制刷新窗口状态
+                let _ = SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                );
+            }
         }
     }
 }

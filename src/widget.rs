@@ -3,6 +3,7 @@ use crate::window::WindowManager;
 use crate::graphics::Renderer;
 use crate::font::FontManager;
 use crate::system::SystemManager;
+use crate::window::ensure_taskbar_hidden;
 
 use crate::lyrics::LyricsData;
 use crate::system::MediaInfo;
@@ -156,12 +157,22 @@ impl TaskbarWidget {
         // 位置更新后立即确保最上层，防止被其他窗口遮挡
         self.ensure_topmost();
         
+        // 确保任务栏图标隐藏（位置变更可能影响窗口样式）
+        if let Some(window) = self.window_manager.get_window() {
+            ensure_taskbar_hidden(window);
+        }
+        
         Ok(())
     }
 
     /// 确保窗口始终在最上层
     pub fn ensure_topmost(&self) {
         self.window_manager.ensure_topmost();
+        
+        // 同时确保任务栏图标隐藏
+        if let Some(window) = self.window_manager.get_window() {
+            ensure_taskbar_hidden(window);
+        }
     }
 
     /// 绘制内容
@@ -244,13 +255,20 @@ impl TaskbarWidget {
 
     /// 显示窗口
     pub fn show_window(&self) {
-        if let Some(hwnd) = self.get_window_hwnd() {
-            unsafe {
-                // 使用 SW_SHOWNOACTIVATE 显示窗口，但不激活它
-                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        if let Some(window) = self.window_manager.get_window() {
+            // 在显示窗口前确保任务栏图标隐藏
+            ensure_taskbar_hidden(window);
+            
+            if let Some(hwnd) = self.get_window_hwnd() {
+                unsafe {
+                    // 使用 SW_SHOWNOACTIVATE 显示窗口，但不激活它
+                    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                }
             }
-            // 显示窗口后立即确保最上层
+            
+            // 显示窗口后立即确保最上层并再次确认任务栏隐藏
             self.ensure_topmost();
+            ensure_taskbar_hidden(window);
         }
     }
 
