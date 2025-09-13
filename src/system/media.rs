@@ -172,7 +172,8 @@ impl MediaMonitor {
         let title = session_properties.Title().ok()?.to_string();
         let artist = session_properties.Artist().ok()?.to_string();
 
-        if title.is_empty() || artist.is_empty() {
+        // 检查歌曲信息是否有效
+        if title.trim().is_empty() || artist.trim().is_empty() {
             return None;
         }
 
@@ -190,8 +191,8 @@ impl MediaMonitor {
 
         Some(MediaInfo {
             app_name: String::new(),
-            title,
-            artist,
+            title: title.trim().to_string(), // 去除首尾空格
+            artist: artist.trim().to_string(), // 去除首尾空格
             duration: Some(duration),
             position: Some(current_position),
             playback_status,

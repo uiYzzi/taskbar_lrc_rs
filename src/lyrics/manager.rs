@@ -95,7 +95,18 @@ impl LyricsManager {
         match event {
             PlaybackEvent::SongChanged { title, artist, .. } => {
                 let song_info = SongInfo::new(title, artist);
-                self.load_lyrics_for_song(song_info).await;
+                info!("播放事件：歌曲切换 -> {}", song_info);
+                
+                // 检查是否与当前歌曲相同（避免重复加载）
+                let state = self.state.read().await;
+                let is_different_song = state.current_song.as_ref() != Some(&song_info);
+                drop(state);
+                
+                if is_different_song {
+                    self.load_lyrics_for_song(song_info).await;
+                } else {
+                    debug!("播放事件：歌曲无变化，跳过歌词加载");
+                }
             }
             PlaybackEvent::PositionUpdate { position } => {
                 // 仅在播放时更新位置和歌词行
@@ -115,6 +126,7 @@ impl LyricsManager {
                 }
             }
             PlaybackEvent::Reset => {
+                info!("播放事件：重置");
                 self.clear_lyrics().await;
             }
         }
@@ -130,9 +142,30 @@ impl LyricsManager {
                     // 检查是否是新歌曲
                     let state = self.state.read().await;
                     let is_new_song = state.current_song.as_ref() != Some(&song_info);
+                    let old_song = state.current_song.clone();
                     drop(state);
                     
                     if is_new_song {
+                        info!("检测到歌曲切换: {:?} -> {:?}", old_song, song_info);
+                        
+                        // 立即清空当前歌词状态，防止使用旧歌词
+                        {
+                            let mut state = self.state.write().await;
+                            state.current_line = None;
+                            state.current_lyrics = None;
+                            state.current_position = Duration::ZERO;
+                            state.last_updated = Instant::now();
+                        }
+                        
+                        // 清空旧歌曲的缓存（如果存在）
+                        if let Some(old_song_info) = old_song {
+                            self.parsed_lyrics_cache.write().await.remove(&old_song_info);
+                        }
+                        
+                        // 发送歌词清空事件，确保UI立即更新
+                        let _ = self.event_sender.send(LyricsEvent::Cleared);
+                        
+                        // 加载新歌词
                         self.load_lyrics_for_song(song_info).await;
                     }
                     
@@ -140,6 +173,9 @@ impl LyricsManager {
                     if let Some(position) = media_info.position {
                         self.update_current_position(position).await;
                     }
+                } else {
+                    // 媒体信息为空时，清空歌词
+                    self.clear_lyrics().await;
                 }
             }
             MediaEvent::Error(_) | MediaEvent::Stopped => {
@@ -152,13 +188,14 @@ impl LyricsManager {
     async fn load_lyrics_for_song(&self, song_info: SongInfo) {
         info!("开始加载歌词: {}", song_info);
         
-        // 更新状态：开始加载
+        // 更新状态：开始加载，确保完全重置状态
         {
             let mut state = self.state.write().await;
             state.current_song = Some(song_info.clone());
             state.is_loading = true;
             state.current_lyrics = None;
             state.current_line = None;
+            state.current_position = Duration::ZERO; // 重置播放位置
             state.last_updated = Instant::now();
         }
         
@@ -230,12 +267,18 @@ impl LyricsManager {
 
     /// 更新当前歌词行
     async fn update_current_lyrics_line(&self, position: Duration) {
-        let state = self.state.read().await;
-        let song_info = match &state.current_song {
-            Some(song) => song.clone(),
-            None => return,
+        let (song_info, is_loading) = {
+            let state = self.state.read().await;
+            match &state.current_song {
+                Some(song) => (song.clone(), state.is_loading),
+                None => return,
+            }
         };
-        drop(state);
+        
+        // 如果正在加载歌词，不进行歌词行匹配，避免使用旧缓存
+        if is_loading {
+            return;
+        }
         
         // 从缓存获取解析后的歌词
         let parsed_lyrics = {
@@ -254,6 +297,7 @@ impl LyricsManager {
             let mut state = self.state.write().await;
             let line_changed = state.current_line != current_line;
             state.current_line = current_line.clone();
+            state.current_position = position; // 同步更新播放位置
             
             // 只有在歌词行改变时才发送事件
             if line_changed {
@@ -333,18 +377,35 @@ impl LyricsManager {
 
     /// 清空歌词
     async fn clear_lyrics(&self) {
+        info!("清空歌词状态");
+        
         {
             let mut state = self.state.write().await;
+            let old_song = state.current_song.clone();
+            
             state.current_song = None;
             state.current_lyrics = None;
             state.is_loading = false;
             state.current_line = None;
             state.current_position = Duration::ZERO;
             state.last_updated = Instant::now();
+            
+            if let Some(song) = old_song {
+                debug!("清空歌曲: {}", song);
+            }
         }
         
         // 清空缓存
-        self.parsed_lyrics_cache.write().await.clear();
+        let cache_size = {
+            let mut cache = self.parsed_lyrics_cache.write().await;
+            let size = cache.len();
+            cache.clear();
+            size
+        };
+        
+        if cache_size > 0 {
+            debug!("清空歌词缓存，共 {} 项", cache_size);
+        }
         
         // 发送清空事件
         let _ = self.event_sender.send(LyricsEvent::Cleared);

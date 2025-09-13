@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{watch, RwLock};
+use tracing::{info, debug};
 use crate::system::MediaInfo;
 
 /// 播放状态事件
@@ -141,6 +142,7 @@ impl PlaybackTimer {
         let is_new_song = current_song != new_song;
         
         if is_new_song {
+            info!("播放定时器检测到歌曲切换: {:?} -> {:?}", current_song, new_song);
             
             // 更新歌曲信息
             *self.current_song.write().await = new_song.clone();
@@ -195,6 +197,7 @@ impl PlaybackTimer {
                 
                 // 如果位置偏差超过1秒，进行校正
                 if position_diff > Duration::from_secs(1) {
+                    debug!("校正播放位置偏差: {:?} -> {:?} (偏差: {:?})", current_pos, actual_position, position_diff);
                     self.base_position_ms.store(actual_position.as_millis() as u64, Ordering::Relaxed);
                     self.last_update_timestamp.store(Self::current_timestamp_ms(self.start_time), Ordering::Relaxed);
                     
