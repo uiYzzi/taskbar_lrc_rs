@@ -148,9 +148,11 @@ impl LyricsManager {
                     if is_new_song {
                         info!("检测到歌曲切换: {:?} -> {:?}", old_song, song_info);
                         
-                        // 立即清空当前歌词状态，防止使用旧歌词
+                        // 立即设置为加载状态，并更新歌曲信息，这样界面会立即显示歌曲信息
                         {
                             let mut state = self.state.write().await;
+                            state.current_song = Some(song_info.clone());
+                            state.is_loading = true; // 设置为加载中
                             state.current_line = None;
                             state.current_lyrics = None;
                             state.current_position = Duration::ZERO;
@@ -162,8 +164,10 @@ impl LyricsManager {
                             self.parsed_lyrics_cache.write().await.remove(&old_song_info);
                         }
                         
-                        // 发送歌词清空事件，确保UI立即更新
-                        let _ = self.event_sender.send(LyricsEvent::Cleared);
+                        // 发送加载开始事件，让界面立即显示歌曲信息
+                        let _ = self.event_sender.send(LyricsEvent::LoadingStarted {
+                            song_info: song_info.clone(),
+                        });
                         
                         // 加载新歌词
                         self.load_lyrics_for_song(song_info).await;
@@ -188,21 +192,23 @@ impl LyricsManager {
     async fn load_lyrics_for_song(&self, song_info: SongInfo) {
         info!("开始加载歌词: {}", song_info);
         
-        // 更新状态：开始加载，确保完全重置状态
+        // 检查是否已经设置为加载状态，如果没有则设置
         {
             let mut state = self.state.write().await;
-            state.current_song = Some(song_info.clone());
-            state.is_loading = true;
-            state.current_lyrics = None;
-            state.current_line = None;
-            state.current_position = Duration::ZERO; // 重置播放位置
-            state.last_updated = Instant::now();
+            if state.current_song != Some(song_info.clone()) || !state.is_loading {
+                state.current_song = Some(song_info.clone());
+                state.is_loading = true;
+                state.current_lyrics = None;
+                state.current_line = None;
+                state.current_position = Duration::ZERO;
+                state.last_updated = Instant::now();
+                
+                // 发送加载开始事件
+                let _ = self.event_sender.send(LyricsEvent::LoadingStarted {
+                    song_info: song_info.clone(),
+                });
+            }
         }
-        
-        // 发送加载开始事件
-        let _ = self.event_sender.send(LyricsEvent::LoadingStarted {
-            song_info: song_info.clone(),
-        });
         
         // 异步加载歌词
         match self.lyrics_service.search_and_get_lyrics(&song_info).await {
