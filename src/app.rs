@@ -239,6 +239,9 @@ impl App {
                                 LyricsEvent::LoadingStarted { song_info: _ } => {
                                     let mut state = app_state.write().await;
                                     state.lyrics_state.is_loading = true;
+                                    // 清理当前歌词状态，防止显示旧数据
+                                    state.lyrics_state.current_lyrics = None;
+                                    state.lyrics_state.current_line = None;
                                     state.last_updated = Instant::now();
                                 }
                                 LyricsEvent::LoadingCompleted { song_info: _, ref lyrics } => {
@@ -250,6 +253,9 @@ impl App {
                                 LyricsEvent::LoadingFailed { song_info: _, error: _ } => {
                                     let mut state = app_state.write().await;
                                     state.lyrics_state.is_loading = false;
+                                    // 加载失败时清理歌词状态
+                                    state.lyrics_state.current_lyrics = None;
+                                    state.lyrics_state.current_line = None;
                                     state.last_updated = Instant::now();
                                 }
                                 LyricsEvent::CurrentLineUpdated { ref line, position } => {

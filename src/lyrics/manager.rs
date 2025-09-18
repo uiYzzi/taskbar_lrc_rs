@@ -73,6 +73,8 @@ pub struct LyricsManager {
     event_sender: watch::Sender<LyricsEvent>,
     /// 解析后的歌词缓存 (歌曲信息 -> 时间戳歌词列表)
     parsed_lyrics_cache: RwLock<HashMap<SongInfo, Vec<(u64, String)>>>,
+    /// 缓存最后清理时间，用于定期清理
+    cache_last_cleanup: RwLock<Instant>,
 }
 
 impl LyricsManager {
@@ -85,6 +87,7 @@ impl LyricsManager {
             state: RwLock::new(LyricsState::default()),
             event_sender,
             parsed_lyrics_cache: RwLock::new(HashMap::new()),
+            cache_last_cleanup: RwLock::new(Instant::now()),
         };
         
         (manager, event_receiver)
@@ -139,32 +142,53 @@ impl LyricsManager {
                 if !media_info.title.is_empty() && !media_info.artist.is_empty() {
                     let song_info = SongInfo::new(&media_info.title, &media_info.artist);
                     
-                    // 检查是否是新歌曲
-                    let state = self.state.read().await;
-                    let is_new_song = state.current_song.as_ref() != Some(&song_info);
-                    let old_song = state.current_song.clone();
-                    drop(state);
+                    // 检查是否是新歌曲，使用更严格的检测逻辑
+                    let (is_new_song, old_song, needs_cache_cleanup) = {
+                        let state = self.state.read().await;
+                        let current_song = state.current_song.clone();
+                        let is_different = current_song.as_ref() != Some(&song_info);
+                        
+                        // 即使歌曲信息相同，如果状态异常也需要重新加载
+                        let state_inconsistent = if let Some(ref _current) = current_song {
+                            // 检查状态是否一致：有歌曲信息但没有歌词数据且不在加载状态
+                            !state.is_loading && state.current_lyrics.is_none() && state.current_line.is_none()
+                        } else {
+                            false
+                        };
+                        
+                        let should_reload = is_different || state_inconsistent;
+                        let needs_cleanup = is_different || state_inconsistent;
+                        
+                        (should_reload, current_song, needs_cleanup)
+                    };
                     
                     if is_new_song {
-                        info!("检测到歌曲切换: {:?} -> {:?}", old_song, song_info);
+                        info!("检测到歌曲切换或状态异常: {:?} -> {:?}", old_song, song_info);
                         
-                        // 立即设置为加载状态，并更新歌曲信息，这样界面会立即显示歌曲信息
+                        // 立即设置为加载状态，并更新歌曲信息
                         {
                             let mut state = self.state.write().await;
                             state.current_song = Some(song_info.clone());
-                            state.is_loading = true; // 设置为加载中
+                            state.is_loading = true;
                             state.current_line = None;
                             state.current_lyrics = None;
                             state.current_position = Duration::ZERO;
                             state.last_updated = Instant::now();
                         }
                         
-                        // 清空旧歌曲的缓存（如果存在）
-                        if let Some(old_song_info) = old_song {
-                            self.parsed_lyrics_cache.write().await.remove(&old_song_info);
+                        // 强制清理缓存（包括当前歌曲的缓存，防止使用过期数据）
+                        if needs_cache_cleanup {
+                            let mut cache = self.parsed_lyrics_cache.write().await;
+                            if let Some(old_song_info) = old_song {
+                                cache.remove(&old_song_info);
+                                debug!("清理旧歌曲缓存: {:?}", old_song_info);
+                            }
+                            // 同时清理当前歌曲的缓存，确保使用最新数据
+                            cache.remove(&song_info);
+                            debug!("清理当前歌曲缓存以确保数据新鲜: {:?}", song_info);
                         }
                         
-                        // 发送加载开始事件，让界面立即显示歌曲信息
+                        // 发送加载开始事件
                         let _ = self.event_sender.send(LyricsEvent::LoadingStarted {
                             song_info: song_info.clone(),
                         });
@@ -286,6 +310,9 @@ impl LyricsManager {
             return;
         }
         
+        // 定期清理缓存（在更新歌词行时检查）
+        self.cleanup_cache().await;
+        
         // 从缓存获取解析后的歌词
         let parsed_lyrics = {
             let cache = self.parsed_lyrics_cache.read().await;
@@ -401,17 +428,8 @@ impl LyricsManager {
             }
         }
         
-        // 清空缓存
-        let cache_size = {
-            let mut cache = self.parsed_lyrics_cache.write().await;
-            let size = cache.len();
-            cache.clear();
-            size
-        };
-        
-        if cache_size > 0 {
-            debug!("清空歌词缓存，共 {} 项", cache_size);
-        }
+        // 在清空歌词时检查是否需要清理缓存
+        self.cleanup_cache().await;
         
         // 发送清空事件
         let _ = self.event_sender.send(LyricsEvent::Cleared);
@@ -459,5 +477,36 @@ impl LyricsManager {
                 debug!("预加载歌词失败: {} - {}", song_info, e);
             }
         }
+    }
+    
+    /// 清理过期的内存缓存
+    pub async fn cleanup_cache(&self) {
+        let now = Instant::now();
+        let should_cleanup = {
+            let last_cleanup = self.cache_last_cleanup.read().await;
+            now.duration_since(*last_cleanup) > Duration::from_secs(1800) // 30分钟清理一次
+        };
+        
+        if should_cleanup {
+            let mut cache = self.parsed_lyrics_cache.write().await;
+            let cache_size_before = cache.len();
+            
+            // 如果缓存太大，保留最近的100首歌的缓存
+            if cache_size_before > 100 {
+                // 清空所有缓存，重新开始
+                cache.clear();
+                info!("清理内存歌词缓存，清理前: {} 项", cache_size_before);
+            }
+            
+            // 更新最后清理时间
+            *self.cache_last_cleanup.write().await = now;
+        }
+    }
+    
+    /// 获取缓存统计信息
+    pub async fn get_cache_stats(&self) -> (usize, Instant) {
+        let cache_size = self.parsed_lyrics_cache.read().await.len();
+        let last_cleanup = *self.cache_last_cleanup.read().await;
+        (cache_size, last_cleanup)
     }
 }

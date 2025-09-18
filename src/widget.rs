@@ -349,11 +349,17 @@ impl TaskbarWidget {
                 }
             }
             
-            // 如果有歌词数据但没有当前行，显示无歌词提示
-            if self.current_lyrics.is_some() {
-                return "♪ 暂无歌词 ♪".to_string();
+            // 检查是否有歌词数据但没有当前行（可能是状态不一致）
+            if let Some(ref lyrics_data) = self.current_lyrics {
+                if lyrics_data.has_any_content() {
+                    // 有歌词数据但没有当前行，可能是时间不匹配
+                    return "♪ 暂无歌词 ♪".to_string();
+                } else {
+                    // 歌词数据存在但为空，可能是无歌词歌曲
+                    return format!("{} - {}", media.artist, media.title);
+                }
             } else {
-                // 正在播放但没有歌词，显示歌曲信息
+                // 正在播放但没有歌词数据，显示歌曲信息
                 return format!("{} - {}", media.artist, media.title);
             }
         }
